@@ -1,0 +1,134 @@
+SET ThousandSep='.';
+SET DecimalSep=',';
+SET MoneyThousandSep='.';
+SET MoneyDecimalSep=',';
+SET MoneyFormat='R$#.##0,00;-R$#.##0,00';
+SET TimeFormat='hh:mm:ss';
+SET DateFormat='DD/MM/YYYY';
+SET TimestampFormat='DD/MM/YYYY hh:mm:ss[.fff]';
+SET FirstWeekDay=6;
+SET BrokenWeeks=1;
+SET ReferenceDay=0;
+SET FirstMonthOfYear=1;
+SET CollationLocale='pt-BR';
+SET CreateSearchIndexOnReload=1;
+SET MonthNames='jan;fev;mar;abr;mai;jun;jul;ago;set;out;nov;dez';
+SET LongMonthNames='janeiro;fevereiro;março;abril;maio;junho;julho;agosto;setembro;outubro;novembro;dezembro';
+SET DayNames='seg;ter;qua;qui;sex;sáb;dom';
+SET LongDayNames='segunda-feira;terça-feira;quarta-feira;quinta-feira;sexta-feira;sábado;domingo';
+SET NumericalAbbreviation='3:k;6:M;9:G;12:T;15:P;18:E;21:Z;24:Y;-3:m;-6:μ;-9:n;-12:p;-15:f;-18:a;-21:z;-24:y';
+
+SET vMaxPeriodoPrevisao   = 10;
+SET vProphet              = 'off';
+SET vMinPrev              = 'off';
+SET vMaxPrev              = 'off';
+
+
+[GASOLINA]:
+LOAD
+    Text(Bandeira)                           as bandeira,
+    Text(Revenda)                            as posto,
+    Text([CNPJ da Revenda])					 as cnpj,
+    Date([Data da Coleta], 'DD/MM/YY')       as dataColeta,
+    Num([Valor de Venda])                    as preco
+FROM [lib://ML/2019-1_CA_ITU.csv]
+(txt, utf8, embedded labels, delimiter is ',', msq);
+
+
+// Obter a maior e menor data existente no dataSet original, a partir desta será incremetado as datas
+[RangeData]:
+LOAD
+    min([dataColeta]) as minDate,
+    max([dataColeta]) as maxDate
+RESIDENT [GASOLINA];
+  // Range geração de calendario auxiliar	
+  LET vMinDt = Peek('minDate', 0, 'RangeData');
+  LET vMaxDt = Peek('maxDate', 0, 'RangeData');
+  // Periodo futuro =  invremento da (a maior data + 1 existente) somado ao periodo maximo de previsões 
+  LET vDataInicioForecast = Peek('maxDate', 0, 'RangeData') + 1;
+  LET vDataFimForecast = $(vDataInicioForecast) + $(vMaxPeriodoPrevisao);
+drop table RangeData;
+
+
+[Calendario_Futuro]:
+  LOAD
+      DATA_FUTURO,
+      SEMANA_FUTURO,
+      MES_FUTURO,
+      ANO_FUTURO,
+      PERIDO_TEMPORAL,
+      CHAVE_CALENDARIO;
+ LOAD
+      DATA_FUTURO,
+      Dual(Year([DATA_FUTURO]) & '-' & Week([DATA_FUTURO]), WeekStart([DATA_FUTURO]))   AS SEMANA_FUTURO,
+      Dual(Year([DATA_FUTURO]) & '-' & Month([DATA_FUTURO]), MonthStart([DATA_FUTURO])) AS MES_FUTURO,
+      Year([DATA_FUTURO])                          										AS ANO_FUTURO,
+      '<FUTURO>' 																		AS CHAVE_CALENDARIO, 
+      'Futuro'                         													AS PERIDO_TEMPORAL;
+  LOAD 
+        Date($(vDataInicioForecast) + IterNo() - 1)                                     AS DATA_FUTURO 
+  		AutoGenerate 1
+  		While $(vDataInicioForecast) + IterNo() - 1 <= $(vDataFimForecast);
+
+Concatenate([Calendario_Futuro])
+
+	LOAD DISTINCT
+      dataColeta  																	 as DATA_FUTURO,
+      Dual(Year([dataColeta]) & '-' & Week([dataColeta]), WeekStart([dataColeta]))   as SEMANA_FUTURO,
+      Dual(Year([dataColeta]) & '-' & Month([dataColeta]), MonthStart([dataColeta])) as MES_FUTURO,
+      Year([dataColeta])                                                             as ANO_FUTURO,
+      'Historico'                         											 as PERIDO_TEMPORAL,
+      dataColeta 																	 as CHAVE_CALENDARIO 
+  RESIDENT [GASOLINA];
+  
+  
+  [link_calendario]:
+  LOAD DISTINCT
+      dataColeta,
+      'Atual'    as TIPO_DADO,
+      dataColeta as CHAVE_CALENDARIO
+  RESIDENT GASOLINA;
+
+Concatenate([link_calendario])
+  LOAD DISTINCT
+      dataColeta,
+      'Generic'     as TIPO_DADO,
+      '<FUTURO>'    as CHAVE_CALENDARIO
+  RESIDENT GASOLINA;
+   
+  
+[posto_max]:
+  LOAD DISTINCT
+  Text(posto)                 as nomePosto,
+  Date(max(dataColeta))       as maxPostoData,
+  Text(bandeira)			  as bandeiraPosto,
+  Text(cnpj)				  as cnpjPosto
+  RESIDENT GASOLINA
+  GROUP BY bandeira,cnpj,posto;
+
+[temp_intervalo]:
+ LOAD 
+    Date($(vMinDt)  + IterNo() - 1) AS DATA_ALL 
+  	AutoGenerate 1
+  	While $(vMinDt) + IterNo() - 1 <= $(vMaxDt);
+    
+FOR x = 1 to NoOfRows('posto_max')
+  LET vIdPosto  = peek('nomePosto'    , '$(x)', 'posto_max');
+  LET vDTPosto  = peek('maxPostoData' , '$(x)', 'posto_max');
+  LET vBandeira = peek('bandeiraPosto', '$(x)', 'posto_max');
+  LET vCnpj     = peek('cnpjPosto'    , '$(x)', 'posto_max');
+  IF '$(vIdPosto)' <> '' and '$(vDTPosto)' <> '' THEN
+    Concatenate([GASOLINA])
+    LOAD DISTINCT
+     Text('$(vBandeira)')	as bandeira,
+     Text('$(vIdPosto)')	as posto,
+     Text('$(vCnpj)')	    as cnpj,
+     DATA_ALL	    		as dataColeta,
+     Null()	    		    as preco
+    RESIDENT [temp_intervalo]
+    WHERE DATA_ALL > '$(vDTPosto)';
+  ENDIF
+NEXT x
+
+DROP Table posto_max;
+DROP Table temp_intervalo;
